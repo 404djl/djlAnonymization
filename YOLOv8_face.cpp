@@ -89,7 +89,7 @@ void YOLOv8_face::generate_proposal(Mat& out, vector<Rect>& boxes, vector<float>
                                     int imgh, int imgw, float ratioh, float ratiow, int padh, int padw)
 {
     const int num_proposals = out.size[2]; // e.g., 8400
-    const int num_channels = out.size[1];  // should be 6
+    const int num_channels = out.size[1];  // should be 5
 
     float* data = (float*)out.data;
 

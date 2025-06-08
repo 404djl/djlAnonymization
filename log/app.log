@@ -9153,3 +9153,5 @@
 2025-05-19 20:26:18 [32mINFO [0m YOLOv8_face.c:119: num_proposals:4264, xmin=159.1, ymin=382.5, xmax=289.8, ymax=434.5, final_score=0.8
 
 2025-05-19 20:26:18 [32mINFO [0m Anonymization.c:75: 脱敏程序结束
+2025-05-27 11:03:21 [32mINFO [0m Anonymization.c:32: 日志文件启动
+2025-05-27 11:03:21 [32mINFO [0m Anonymization.c:75: 脱敏程序结束
