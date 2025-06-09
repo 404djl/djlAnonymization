@@ -1,34 +1,64 @@
+# --- Variables ---
+
+# Compiler and C++ Standard
 CXX = g++
-CXX_STD = -std=c++17
-TARGET_EXEC = anonymization_tester
+CXX_STD = -std=c++17 # Use a modern C++ standard
 
-# Path to your Anonymization SDK header and library
-# Adjust if your test harness is not in the same dir as your demo
-SDK_INC_DIR = ../  # Assuming Anonymization.h is in the parent dir
-SDK_LIB_DIR = ./lib # Assuming libAnonymization.so is there
+# Directories
+# Assumes libAnonymization.so is in ./lib relative to this Makefile
+LIB_DIR = ./lib
+# Assumes Anonymization.h is in ../ relative to this Makefile
+INC_DIR = ../
 
-SRCS = $(wildcard *.cpp) # Assuming test harness is one .cpp file
+# Target Executable Name
+TARGET = ./Anonymization_demo # Renamed to avoid confusion with the library
+
+# Source Files (find all .cpp in the current directory)
+SRCS = $(wildcard *.cpp)
+# Object Files (generate .o from .cpp)
 OBJS = $(SRCS:.cpp=.o)
 
-# OPENCV_CFLAGS = $(shell pkg-config --cflags opencv4)
+# OpenCV Configuration (using pkg-config is recommended)
 # OPENCV_LIBS = $(shell pkg-config --libs opencv4)
+# OPENCV_CFLAGS = $(shell pkg-config --cflags opencv4)
+# # --- If pkg-config is not available, uncomment and set these manually ---
 OPENCV_LIBS = -lopencv_core -lopencv_imgproc -lopencv_highgui -lopencv_videoio -lopencv_imgcodecs -lopencv_dnn # Add more if needed
 OPENCV_CFLAGS = -I/usr/local/include/opencv4
 
-INCLUDES = -I$(SDK_INC_DIR) $(OPENCV_CFLAGS)
-CXXFLAGS = -g -Wall -Wextra $(CXX_STD) $(INCLUDES) -pthread # -pthread if chrono uses it
+# Include Paths (-I)
+INCLUDES = -I$(INC_DIR) $(OPENCV_CFLAGS)
 
-LDFLAGS = -L$(SDK_LIB_DIR) -Wl,-rpath=$(SDK_LIB_DIR)
+# Compiler Flags (-g for debug, -Wall -Wextra for warnings)
+CXXFLAGS = -g -Wall -Wextra $(CXX_STD) $(INCLUDES)
+
+# Linker Flags (-L to specify library path, -Wl,-rpath to embed runtime path)
+# -Wl,-rpath=$(LIB_DIR) makes it easier to run the demo without setting LD_LIBRARY_PATH
+LDFLAGS = -L$(LIB_DIR) -Wl,-rpath=$(LIB_DIR)
+
+# Libraries to Link (-l)
 LDLIBS = -lAnonymization $(OPENCV_LIBS)
 
-all: $(TARGET_EXEC)
+# --- Rules ---
 
-$(TARGET_EXEC): $(OBJS)
+# Default Target
+all: $(TARGET)
+
+# Link the Executable
+$(TARGET): $(OBJS)
+	@echo "Linking target: $@"
 	$(CXX) $^ -o $@ $(LDFLAGS) $(LDLIBS)
+	@echo "Successfully built $(TARGET)"
 
+# Compile C++ Source Files (.cpp -> .o)
 %.o: %.cpp
+	@echo "Compiling C++: $<"
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
+# Phony Targets
+.PHONY: all clean
+
+# Clean up build files
 clean:
-	rm -f $(OBJS) $(TARGET_EXEC) test_results_log.csv
-	rm -rf output_results/
+	@echo "Cleaning demo build files..."
+	rm -f $(OBJS) $(TARGET)
+	@echo "Clean complete."

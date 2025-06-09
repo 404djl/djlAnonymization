@@ -225,10 +225,10 @@ int Anonymization_API image_anonymization(IN AnonymizationHandle handle,
 }
 
 int Anonymization_API mem_anonymization(IN AnonymizationHandle handle,
-                                    IN_OUT ImageFrame *image,
-                                    IN BlurType blurType) {
+                                      IN_OUT ImageFrame *image,
+                                      IN BlurType blurType) {
     if (!isValidHandle(handle)) return HANDLE_INVALID;
-    if (image == nullptr || image->data[0] == nullptr) { // YUV 可能有 image->data[0], [1], [2]
+    if (image == nullptr || image->data[0] == nullptr) {
         log_error("mem_anonymization: Invalid parameter - image or image->data[0] is NULL.");
         return INVALID_PARAMETER;
     }
@@ -240,72 +240,104 @@ int Anonymization_API mem_anonymization(IN AnonymizationHandle handle,
     log_debug("mem_anonymization: Input image format: %d, WxH: %dx%d, blur: %d",
               static_cast<int>(image->format), image->width, image->height, static_cast<int>(blurType));
 
-    cv::Mat frame_bgr; // 目标是转换为 BGR
+    cv::Mat frame_bgr; // The goal is to convert any input format to BGR for the model.
 
-    // --- 从 ImageFrame 转换为 cv::Mat (BGR) ---
-    // (这部分代码与您之前的版本类似，但现在使用 context->model)
-    // ... (此处省略了详细的格式转换代码，因为它很长，假设之前的版本是正确的)
-    // 请确保在每个 case 中检查 image->data 指针的有效性 (例如 YUV420P 的 data[1], data[2])
-    // 并在创建 cv::Mat 后检查 frame_bgr.empty()
+    // --- Convert ImageFrame To cv::Mat (BGR) ---
+    switch (image->format) {
+        case IMG_FORMAT_BGR:
+            if (image->strides[0] < image->width * 3) {
+                log_error("mem_anonymization: BGR stride[0] (%d) is less than width*channels (%d).", image->strides[0], image->width * 3);
+                return INVALID_PARAMETER;
+            }
+            frame_bgr = cv::Mat(image->height, image->width, CV_8UC3, image->data[0], image->strides[0]);
+            break;
 
-    // --- 示例：IMG_FORMAT_BGR 的情况 ---
-    if (image->format == IMG_FORMAT_BGR) {
-        if (image->strides[0] < image->width * 3) {
-             log_error("mem_anonymization: BGR image stride[0] (%d) is less than width*channels (%d).", image->strides[0], image->width * 3);
-             return INVALID_PARAMETER;
+        case IMG_FORMAT_RGB: // New case
+            if (image->strides[0] < image->width * 3) {
+                log_error("mem_anonymization: RGB stride[0] (%d) is less than width*channels (%d).", image->strides[0], image->width * 3);
+                return INVALID_PARAMETER;
+            }
+            {
+                cv::Mat rgbMat(image->height, image->width, CV_8UC3, image->data[0], image->strides[0]);
+                cv::cvtColor(rgbMat, frame_bgr, cv::COLOR_RGB2BGR);
+            }
+            break;
+
+        case IMG_FORMAT_ARGB:
+            if (image->strides[0] < image->width * 4) {
+                log_error("mem_anonymization: ARGB stride[0] (%d) is less than width*channels (%d).", image->strides[0], image->width * 4);
+                return INVALID_PARAMETER;
+            }
+            {
+                cv::Mat bgraMat(image->height, image->width, CV_8UC4, image->data[0], image->strides[0]);
+                if (bgraMat.empty()) {
+                    log_error("mem_anonymization: Failed to create BGRA cv::Mat from ImageFrame.");
+                    return LOAD_IMAGE_ERROR;
+                }
+                cv::cvtColor(bgraMat, frame_bgr, cv::COLOR_BGRA2BGR);
+            }
+            break;
+
+        case IMG_FORMAT_GRAY: // New case
+            if (image->strides[0] < image->width) {
+                log_error("mem_anonymization: GRAY stride[0] (%d) is less than width (%d).", image->strides[0], image->width);
+                return INVALID_PARAMETER;
+            }
+            {
+                cv::Mat grayMat(image->height, image->width, CV_8UC1, image->data[0], image->strides[0]);
+                cv::cvtColor(grayMat, frame_bgr, cv::COLOR_GRAY2BGR);
+            }
+            break;
+
+        case IMG_FORMAT_YUV420P:
+            if (!image->data[0] || !image->data[1] || !image->data[2]) {
+                log_error("mem_anonymization: YUV420P data planes are not all valid.");
+                return INVALID_PARAMETER;
+            }
+            if (image->strides[0] < image->width || image->strides[1] < image->width / 2 || image->strides[2] < image->width / 2) {
+                log_error("mem_anonymization: YUV420P strides are invalid for the given width.");
+                return INVALID_PARAMETER;
+            }
+            {
+                cv::Mat yuvMat(image->height * 3 / 2, image->width, CV_8UC1);
+                uint8_t* dst_y = yuvMat.data;
+                uint8_t* dst_u = dst_y + static_cast<size_t>(image->height) * image->width;
+                uint8_t* dst_v = dst_u + static_cast<size_t>(image->height / 2) * (image->width / 2);
+                // Copy Y, U, and V planes row by row to handle custom strides
+                for (int r = 0; r < image->height; ++r) memcpy(dst_y + r * image->width, image->data[0] + r * image->strides[0], image->width);
+                for (int r = 0; r < image->height / 2; ++r) memcpy(dst_u + r * (image->width / 2), image->data[1] + r * image->strides[1], image->width / 2);
+                for (int r = 0; r < image->height / 2; ++r) memcpy(dst_v + r * (image->width / 2), image->data[2] + r * image->strides[2], image->width / 2);
+                cv::cvtColor(yuvMat, frame_bgr, cv::COLOR_YUV2BGR_I420);
+            }
+            break;
+
+        case IMG_FORMAT_YUV420SP: { // New case (assuming NV12: Y plane, then interleaved UV plane)
+            if (!image->data[0] || !image->data[1]) {
+                log_error("mem_anonymization: YUV420SP data planes are not valid.");
+                return INVALID_PARAMETER;
+            }
+            if (image->strides[0] < image->width || image->strides[1] < image->width) { // UV stride is usually width
+                log_error("mem_anonymization: YUV420SP strides are invalid for the given width.");
+                return INVALID_PARAMETER;
+            }
+            cv::Mat yuvMat(image->height * 3 / 2, image->width, CV_8UC1);
+            // Copy Y plane
+            for (int r = 0; r < image->height; ++r) {
+                memcpy(yuvMat.data + r * image->width, image->data[0] + r * image->strides[0], image->width);
+            }
+            // Copy interleaved UV plane
+            uint8_t* dst_uv = yuvMat.data + static_cast<size_t>(image->height) * image->width;
+            for (int r = 0; r < image->height / 2; ++r) {
+                memcpy(dst_uv + r * image->width, image->data[1] + r * image->strides[1], image->width);
+            }
+            cv::cvtColor(yuvMat, frame_bgr, cv::COLOR_YUV2BGR_NV12);
+            break;
         }
-        frame_bgr = cv::Mat(image->height, image->width, CV_8UC3, image->data[0], image->strides[0]);
+
+        default:
+            log_error("mem_anonymization: Unsupported input image format: %d", static_cast<int>(image->format));
+            return UNSUPPORTED_FORMAT;
     }
-    // --- 示例：IMG_FORMAT_ARGB 的情况 ---
-    else if (image->format == IMG_FORMAT_ARGB) {
-        if (image->strides[0] < image->width * 4) {
-             log_error("mem_anonymization: ARGB image stride[0] (%d) is less than width*channels (%d).", image->strides[0], image->width * 4);
-             return INVALID_PARAMETER;
-        }
-        cv::Mat bgraMat(image->height, image->width, CV_8UC4, image->data[0], image->strides[0]);
-        if (bgraMat.empty()) {
-            log_error("mem_anonymization: Failed to create BGRA cv::Mat from ImageFrame.");
-            return LOAD_IMAGE_ERROR;
-        }
-        cv::cvtColor(bgraMat, frame_bgr, cv::COLOR_BGRA2BGR);
-    }
-    // ... 实现所有其他格式的转换 ...
-    // 例如 YUV420P:
-    else if (image->format == IMG_FORMAT_YUV420P) {
-        if (!image->data[0] || !image->data[1] || !image->data[2]) {
-            log_error("mem_anonymization: YUV420P image data planes are not all valid.");
-            return INVALID_PARAMETER;
-        }
-        // 确保 strides 对于每个平面都是合理的
-        if (image->strides[0] < image->width || image->strides[1] < image->width / 2 || image->strides[2] < image->width / 2) {
-            log_error("mem_anonymization: YUV420P image strides are invalid for the given width.");
-            return INVALID_PARAMETER;
-        }
-
-        cv::Mat yuvMat(image->height * 3 / 2, image->width, CV_8UC1);
-        uint8_t* dst_y = yuvMat.data;
-        uint8_t* dst_u = dst_y + static_cast<size_t>(image->height) * image->width; // 假设OpenCV Mat内部Y是紧凑的
-        uint8_t* dst_v = dst_u + static_cast<size_t>(image->height / 2) * (image->width / 2); // 假设U是紧凑的
-
-        // Copy Y
-        for (int r = 0; r < image->height; ++r) {
-            memcpy(dst_y + r * image->width, image->data[0] + r * image->strides[0], image->width);
-        }
-        // Copy U
-        for (int r = 0; r < image->height / 2; ++r) {
-            memcpy(dst_u + r * (image->width / 2), image->data[1] + r * image->strides[1], image->width / 2);
-        }
-        // Copy V
-        for (int r = 0; r < image->height / 2; ++r) {
-            memcpy(dst_v + r * (image->width / 2), image->data[2] + r * image->strides[2], image->width / 2);
-        }
-        cv::cvtColor(yuvMat, frame_bgr, cv::COLOR_YUV2BGR_I420);
-    }
-    else {
-        log_error("mem_anonymization: Unsupported input image format for conversion: %d", static_cast<int>(image->format));
-        return UNSUPPORTED_FORMAT;
-    }
-
 
     if (frame_bgr.empty()) {
         log_error("mem_anonymization: Failed to convert ImageFrame to BGR cv::Mat. Input format was %d.", static_cast<int>(image->format));
@@ -313,86 +345,109 @@ int Anonymization_API mem_anonymization(IN AnonymizationHandle handle,
     }
 
     try {
-        context->model.detect(frame_bgr, blurType); // 使用 context 中的模型
+        context->model.detect(frame_bgr, blurType); // Use the model from the context
     } catch (const std::exception& e) {
         log_error("mem_anonymization: Exception during model detection: %s", e.what());
-        return INTERNAL_ERROR;
+        return -1; // Consider a specific INTERNAL_ERROR code
     } catch (...) {
         log_error("mem_anonymization: Unknown exception during model detection.");
-        return INTERNAL_ERROR;
+        return -1; // Consider a specific INTERNAL_ERROR code
     }
 
-    // --- 将处理后的 cv::Mat (BGR) 转换回 ImageFrame ---
-    // (这部分代码也与您之前的版本类似)
-    // ... (此处省略了详细的格式转换代码)
-    // 务必在每个 case 中进行健全性检查，例如目标 ImageFrame 的 data 指针是否有效，strides 是否足够。
-    // --- 示例：转回 IMG_FORMAT_BGR ---
-    if (image->format == IMG_FORMAT_BGR) {
-        if (static_cast<int>(frame_bgr.step[0]) == image->strides[0] && frame_bgr.data == image->data[0]) {
-            // 如果数据是原地修改且 stride 相同，则无需复制
-            log_debug("mem_anonymization: BGR data processed in-place.");
-        } else if (image->strides[0] >= frame_bgr.cols * frame_bgr.channels()) {
-            for (int i = 0; i < frame_bgr.rows; ++i) {
-                memcpy(image->data[0] + i * image->strides[0],
-                       frame_bgr.data + i * frame_bgr.step[0],
-                       static_cast<size_t>(frame_bgr.cols) * frame_bgr.channels());
+    // --- Convert Processed cv::Mat (BGR) Back to Original ImageFrame Format ---
+    switch (image->format) {
+        case IMG_FORMAT_BGR:
+            if (static_cast<int>(frame_bgr.step[0]) != image->strides[0] || frame_bgr.data != image->data[0]) {
+                if (image->strides[0] < frame_bgr.cols * frame_bgr.channels()) return -2; // SAVE_IMAGE_ERROR
+                for (int i = 0; i < frame_bgr.rows; ++i) {
+                    memcpy(image->data[0] + i * image->strides[0], frame_bgr.data + i * frame_bgr.step[0], static_cast<size_t>(frame_bgr.cols) * frame_bgr.channels());
+                }
             }
-        } else {
-            log_error("mem_anonymization: Output BGR image stride[0] (%d) is too small for processed data.", image->strides[0]);
-            return SAVE_IMAGE_ERROR; // 或其他合适的错误
+            break;
+
+        case IMG_FORMAT_RGB: { // New case
+            cv::Mat rgbImage;
+            cv::cvtColor(frame_bgr, rgbImage, cv::COLOR_BGR2RGB);
+            if (image->strides[0] < rgbImage.cols * rgbImage.channels()) return -2; // SAVE_IMAGE_ERROR
+            for (int i = 0; i < rgbImage.rows; ++i) {
+                memcpy(image->data[0] + i * image->strides[0], rgbImage.data + i * rgbImage.step[0], static_cast<size_t>(rgbImage.cols) * rgbImage.channels());
+            }
+            break;
         }
-    }
-    // --- 示例：转回 IMG_FORMAT_ARGB ---
-    else if (image->format == IMG_FORMAT_ARGB) {
-        cv::Mat bgraImage;
-        cv::cvtColor(frame_bgr, bgraImage, cv::COLOR_BGR2BGRA);
-        if (bgraImage.empty()) {
-             log_error("mem_anonymization: Failed to convert processed BGR to BGRA for output.");
-             return INTERNAL_ERROR;
-        }
-        if (image->strides[0] >= bgraImage.cols * bgraImage.channels()) {
+
+        case IMG_FORMAT_ARGB: {
+            cv::Mat bgraImage;
+            cv::cvtColor(frame_bgr, bgraImage, cv::COLOR_BGR2BGRA);
+            if (bgraImage.empty()) return -1; // INTERNAL_ERROR
+            if (image->strides[0] < bgraImage.cols * bgraImage.channels()) return -2; // SAVE_IMAGE_ERROR
             for (int i = 0; i < bgraImage.rows; ++i) {
-                memcpy(image->data[0] + i * image->strides[0],
-                       bgraImage.data + i * bgraImage.step[0],
-                       static_cast<size_t>(bgraImage.cols) * bgraImage.channels());
+                memcpy(image->data[0] + i * image->strides[0], bgraImage.data + i * bgraImage.step[0], static_cast<size_t>(bgraImage.cols) * bgraImage.channels());
             }
-        } else {
-            log_error("mem_anonymization: Output ARGB image stride[0] (%d) is too small for processed data.", image->strides[0]);
-            return SAVE_IMAGE_ERROR;
+            break;
         }
-    }
-    // ... 实现所有其他格式的转换回原始格式 ...
-    else if (image->format == IMG_FORMAT_YUV420P) {
-        cv::Mat yuv_I420_out;
-        cv::cvtColor(frame_bgr, yuv_I420_out, cv::COLOR_BGR2YUV_I420);
-        if(yuv_I420_out.empty()){
-            log_error("mem_anonymization: Failed to convert processed BGR to YUV_I420 for output.");
-            return INTERNAL_ERROR;
+
+        case IMG_FORMAT_GRAY: { // New case
+            cv::Mat grayImage;
+            cv::cvtColor(frame_bgr, grayImage, cv::COLOR_BGR2GRAY);
+            if (image->strides[0] < grayImage.cols) return -2; // SAVE_IMAGE_ERROR
+            for (int i = 0; i < grayImage.rows; ++i) {
+                memcpy(image->data[0] + i * image->strides[0], grayImage.data + i * grayImage.step[0], grayImage.cols);
+            }
+            break;
         }
-        // Y plane
-        uint8_t* src_y = yuv_I420_out.data;
-        for (int r = 0; r < image->height; ++r) {
-             if (image->strides[0] < image->width) return SAVE_IMAGE_ERROR; // Stride check
-            memcpy(image->data[0] + r * image->strides[0], src_y + r * image->width, image->width);
+
+        case IMG_FORMAT_YUV420P: {
+            cv::Mat yuv_I420_out;
+            cv::cvtColor(frame_bgr, yuv_I420_out, cv::COLOR_BGR2YUV_I420);
+            if (yuv_I420_out.empty()) return -1; // INTERNAL_ERROR
+            uint8_t* src_y = yuv_I420_out.data;
+            uint8_t* src_u = src_y + static_cast<size_t>(image->width) * image->height;
+            int chroma_w = image->width / 2;
+            int chroma_h = image->height / 2;
+            uint8_t* src_v = src_u + static_cast<size_t>(chroma_w) * chroma_h;
+            if (image->strides[0] < image->width || image->strides[1] < chroma_w || image->strides[2] < chroma_w) return -2; // SAVE_IMAGE_ERROR
+            // Copy Y, U, and V planes back to the ImageFrame buffers
+            for (int r = 0; r < image->height; ++r) memcpy(image->data[0] + r * image->strides[0], src_y + r * image->width, image->width);
+            for (int r = 0; r < chroma_h; ++r) memcpy(image->data[1] + r * image->strides[1], src_u + r * chroma_w, chroma_w);
+            for (int r = 0; r < chroma_h; ++r) memcpy(image->data[2] + r * image->strides[2], src_v + r * chroma_w, chroma_w);
+            break;
         }
-        // U plane
-        uint8_t* src_u = src_y + static_cast<size_t>(image->width) * image->height;
-        int chroma_w = image->width / 2;
-        int chroma_h = image->height / 2;
-        for (int r = 0; r < chroma_h; ++r) {
-            if (image->strides[1] < chroma_w) return SAVE_IMAGE_ERROR; // Stride check
-            memcpy(image->data[1] + r * image->strides[1], src_u + r * chroma_w, chroma_w);
+
+        case IMG_FORMAT_YUV420SP: { // New case (assuming NV12)
+            cv::Mat yuv_NV12_out;
+            // OpenCV doesn't have a direct BGR to NV12. A common way is BGR -> I420 -> NV12.
+            cv::Mat yuv_I420_temp;
+            cv::cvtColor(frame_bgr, yuv_I420_temp, cv::COLOR_BGR2YUV_I420);
+            if (yuv_I420_temp.empty()) return -1; // INTERNAL_ERROR
+
+            // Copy Y plane directly
+            uint8_t* src_y = yuv_I420_temp.data;
+             if (image->strides[0] < image->width) return -2; // SAVE_IMAGE_ERROR
+            for (int r = 0; r < image->height; ++r) {
+                memcpy(image->data[0] + r * image->strides[0], src_y + r * image->width, image->width);
+            }
+
+            // Interleave U and V planes into the UV plane of the ImageFrame
+            uint8_t* src_u = src_y + static_cast<size_t>(image->width) * image->height;
+            int chroma_w = image->width / 2;
+            int chroma_h = image->height / 2;
+            uint8_t* src_v = src_u + static_cast<size_t>(chroma_w) * chroma_h;
+            if (image->strides[1] < image->width) return -2; // SAVE_IMAGE_ERROR
+            for (int r = 0; r < chroma_h; ++r) {
+                uint8_t* dst_uv_row = image->data[1] + r * image->strides[1];
+                const uint8_t* src_u_row = src_u + r * chroma_w;
+                const uint8_t* src_v_row = src_v + r * chroma_w;
+                for (int c = 0; c < chroma_w; ++c) {
+                    dst_uv_row[c * 2] = src_u_row[c];     // U
+                    dst_uv_row[c * 2 + 1] = src_v_row[c]; // V
+                }
+            }
+            break;
         }
-        // V plane
-        uint8_t* src_v = src_u + static_cast<size_t>(chroma_w) * chroma_h;
-        for (int r = 0; r < chroma_h; ++r) {
-            if (image->strides[2] < chroma_w) return SAVE_IMAGE_ERROR; // Stride check
-            memcpy(image->data[2] + r * image->strides[2], src_v + r * chroma_w, chroma_w);
-        }
-    }
-     else {
-        log_error("mem_anonymization: Unsupported output image format for conversion back: %d", static_cast<int>(image->format));
-        return UNSUPPORTED_FORMAT;
+
+        default:
+            log_error("mem_anonymization: Unsupported output format: %d", static_cast<int>(image->format));
+            return UNSUPPORTED_FORMAT;
     }
 
     log_debug("mem_anonymization: In-memory processing complete.");
